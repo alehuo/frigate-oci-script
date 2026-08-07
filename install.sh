@@ -324,9 +324,12 @@ if [ "$PULL_REQUIRED" = true ]; then
         log_info "[DRY RUN] Would initiate pull through Proxmox OCI Registry api for $FRIGATE_IMAGE"
     else
         # Remove any existing/incomplete file at the template path to prevent "refusing to override existing file" error
-        if [ -n "$TEMPLATE_PATH" ] && [ -f "$TEMPLATE_PATH" ]; then
-            log_warn "Removing existing/incomplete template file at $TEMPLATE_PATH to allow a fresh pull..."
-            rm -f "$TEMPLATE_PATH"
+        if [ -n "$TEMPLATE_PATH" ]; then
+            if [ -f "$TEMPLATE_PATH" ]; then
+                log_warn "Removing existing/incomplete template file at $TEMPLATE_PATH to allow a fresh pull..."
+                rm -f "$TEMPLATE_PATH"
+            fi
+            rm -f "${TEMPLATE_PATH}.tmp."* 2>/dev/null || true
         fi
 
         log_info "Initiating pull through Proxmox OCI Registry api..."
