@@ -66,6 +66,33 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_info() { echo -e "${CYAN}[INFO]${NC} $1"; }
 error_exit() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
+get_container_ip() {
+    local ctid="$1"
+    local ip=""
+    ip=$(lxc-info -n "$ctid" -i -H 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -v '^127\.' | head -n 1 || echo "")
+    if [ -z "$ip" ]; then
+        ip=$(pvesh get "/nodes/localhost/lxc/${ctid}/interfaces" --output-format json 2>/dev/null | python3 -c "import sys, json
+try:
+    ifaces = json.load(sys.stdin)
+    for iface in ifaces:
+        for inet in iface.get('inet-addresses', []):
+            addr = inet.get('ip', '')
+            if addr and not addr.startswith('127.') and '.' in addr:
+                print(addr)
+                sys.exit(0)
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+    fi
+    if [ -z "$ip" ]; then
+        ip=$(pct exec "$ctid" -- ip -4 addr show eth0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1 || echo "")
+    fi
+    if [ -z "$ip" ]; then
+        ip=$(pct exec "$ctid" -- hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+    fi
+    echo "$ip"
+}
+
 run_cmd() {
     if [ "$DRY_RUN" = true ]; then
         echo -e "${YELLOW}[DRY RUN] Would execute:${NC} $*"
@@ -591,10 +618,10 @@ fi
 # 9. Create Proxmox summary dashboard notes
 log_step "Creating Proxmox summary dashboard..."
 IP_ADDRESS=""
-# Wait up to 5 seconds for IP address allocation if container started successfully
+# Wait up to 10 seconds for IP address allocation if container started successfully
 if [ "$DRY_RUN" = false ] && pct status "$CT_ID" | grep -q "running"; then
-    for i in {1..5}; do
-        IP_ADDRESS=$(pct exec "$CT_ID" -- hostname -I | awk '{print $1}' 2>/dev/null || echo "")
+    for i in {1..10}; do
+        IP_ADDRESS=$(get_container_ip "$CT_ID")
         if [ -n "$IP_ADDRESS" ]; then
             break
         fi

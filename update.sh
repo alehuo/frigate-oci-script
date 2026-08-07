@@ -20,6 +20,33 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_info() { echo -e "${CYAN}[INFO]${NC} $1"; }
 error_exit() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
+get_container_ip() {
+    local ctid="$1"
+    local ip=""
+    ip=$(lxc-info -n "$ctid" -i -H 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -v '^127\.' | head -n 1 || echo "")
+    if [ -z "$ip" ]; then
+        ip=$(pvesh get "/nodes/localhost/lxc/${ctid}/interfaces" --output-format json 2>/dev/null | python3 -c "import sys, json
+try:
+    ifaces = json.load(sys.stdin)
+    for iface in ifaces:
+        for inet in iface.get('inet-addresses', []):
+            addr = inet.get('ip', '')
+            if addr and not addr.startswith('127.') and '.' in addr:
+                print(addr)
+                sys.exit(0)
+except Exception:
+    pass
+" 2>/dev/null || echo "")
+    fi
+    if [ -z "$ip" ]; then
+        ip=$(pct exec "$ctid" -- ip -4 addr show eth0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1 || echo "")
+    fi
+    if [ -z "$ip" ]; then
+        ip=$(pct exec "$ctid" -- hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+    fi
+    echo "$ip"
+}
+
 # Set terminal title
 echo -ne "\033]0;Frigate OCI Script Updater\007"
 
@@ -348,10 +375,10 @@ fi
 # Update Proxmox summary dashboard notes
 log_step "Updating Proxmox summary dashboard..."
 IP_ADDRESS=""
-# Wait up to 5 seconds for IP address allocation if container started successfully
+# Wait up to 10 seconds for IP address allocation if container started successfully
 if [ "$DRY_RUN" = false ] && pct status "$CT_ID" | grep -q "running"; then
-    for i in {1..5}; do
-        IP_ADDRESS=$(pct exec "$CT_ID" -- hostname -I | awk '{print $1}' 2>/dev/null || echo "")
+    for i in {1..10}; do
+        IP_ADDRESS=$(get_container_ip "$CT_ID")
         if [ -n "$IP_ADDRESS" ]; then
             break
         fi
@@ -376,19 +403,25 @@ elif grep -q "usb" "$LXC_CONF"; then
 fi
 
 # Detect bind mounts
-CONFIG_VAL=$(grep "lxc.mount.entry" "$LXC_CONF" | grep -i "config " || echo "")
-MEDIA_VAL=$(grep "lxc.mount.entry" "$LXC_CONF" | grep -i "media/frigate " || echo "")
-CUSTOM_VAL=$(grep "lxc.mount.entry" "$LXC_CONF" | grep -vE "config |media/frigate |/dev/bus/usb" || echo "")
+CONFIG_VAL=$(grep "lxc.mount.entry" "$LXC_CONF" | grep -i "config " | head -n 1 || echo "")
+MEDIA_VAL=$(grep "lxc.mount.entry" "$LXC_CONF" | grep -i "media/frigate " | head -n 1 || echo "")
 
-HOST_CONFIG_PATH=$(echo "$CONFIG_VAL" | awk '{print $2}' || echo "/opt/frigate/config")
-HOST_MEDIA_PATH=$(echo "$MEDIA_VAL" | awk '{print $2}' || echo "/opt/frigate/media")
+HOST_CONFIG_PATH=$(echo "$CONFIG_VAL" | awk '{print $2}' | head -n 1 || echo "")
+HOST_CONFIG_PATH=${HOST_CONFIG_PATH:-"/opt/frigate/config"}
+
+HOST_MEDIA_PATH=$(echo "$MEDIA_VAL" | awk '{print $2}' | head -n 1 || echo "")
+HOST_MEDIA_PATH=${HOST_MEDIA_PATH:-"/opt/frigate/media"}
 
 MOUNT_LINE=""
-if [ -n "$CUSTOM_VAL" ]; then
-    CUSTOM_HOST_M=$(echo "$CUSTOM_VAL" | awk '{print $2}')
-    CUSTOM_CONT_M=$(echo "$CUSTOM_VAL" | awk '{print $3}')
-    MOUNT_LINE="- External Mount: ${CUSTOM_HOST_M} -> /${CUSTOM_CONT_M}\\n"
-fi
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    c_host=$(echo "$line" | awk '{print $2}')
+    c_cont=$(echo "$line" | awk '{print $3}')
+    if [ -n "$c_host" ] && [ -n "$c_cont" ]; then
+        c_clean_cont=$(echo "$c_cont" | sed 's/^\///')
+        MOUNT_LINE="${MOUNT_LINE}- External Mount: ${c_host} -> /${c_clean_cont}\\n"
+    fi
+done < <(grep "lxc.mount.entry" "$LXC_CONF" | grep -vE "config |media/frigate |/dev/bus/usb" || true)
 
 DESCRIPTION=$(echo -e "# Frigate OCI Script
 
