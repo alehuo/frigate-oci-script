@@ -44,6 +44,7 @@ Alternatively, download and run the script manually:
 
 ```bash
 wget https://raw.githubusercontent.com/saihgupr/frigate-oci-script/main/install.sh
+chmod +x install.sh
 bash install.sh
 ```
 
@@ -78,6 +79,7 @@ Alternatively, download and run the script manually:
 
 ```bash
 wget https://raw.githubusercontent.com/saihgupr/frigate-oci-script/main/update.sh
+chmod +x update.sh
 bash update.sh -i <CTID> -v <version>
 ```
 
