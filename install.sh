@@ -336,7 +336,12 @@ TEMPLATE_DIR_PATH=$(pvesm path "${TEMPLATE_STORAGE}:vztmpl/dummy.tar.gz" 2>/dev/
 if [ -n "$TEMPLATE_DIR_PATH" ]; then
     TEMPLATE_PATH="$(dirname "$TEMPLATE_DIR_PATH")/${OCI_TEMPLATE_NAME}.tar"
 else
-    TEMPLATE_PATH=""
+    STORAGE_DIR=$(grep -A 5 "^dir: ${TEMPLATE_STORAGE}" /etc/pve/storage.cfg 2>/dev/null | awk '/path / {print $2}' | head -n 1 || echo "")
+    if [ -n "$STORAGE_DIR" ]; then
+        TEMPLATE_PATH="${STORAGE_DIR}/template/cache/${OCI_TEMPLATE_NAME}.tar"
+    else
+        TEMPLATE_PATH=""
+    fi
 fi
 PULL_REQUIRED=true
 
@@ -359,6 +364,7 @@ if [ "$PULL_REQUIRED" = true ]; then
             rm -f "${TEMPLATE_PATH}.tmp."* 2>/dev/null || true
         fi
 
+        PULL_SUCCESS=false
         log_info "Initiating pull through Proxmox OCI Registry api..."
         PVE_OUT=$(pvesh create "/nodes/localhost/storage/${TEMPLATE_STORAGE}/oci-registry-pull" \
             --reference "$FRIGATE_IMAGE" \
@@ -372,36 +378,61 @@ if [ "$PULL_REQUIRED" = true ]; then
             UPID=$(echo "$PVE_OUT" | grep -o 'UPID:[^[:space:]"]*' | head -n 1 || echo "")
         fi
 
-        if [ -z "$UPID" ] || [[ ! "$UPID" =~ ^UPID: ]]; then
-            error_exit "Failed to initiate OCI registry pull. PVE output: $UPID"
+        if [ -n "$UPID" ] && [[ "$UPID" =~ ^UPID: ]]; then
+            log_info "Task started with UPID: $UPID. Downloading..."
+
+            # Poll PVE task for completion
+            while true; do
+                task_status_json=$(pvesh get "/nodes/localhost/tasks/${UPID}/status" --output-format json 2>/dev/null || echo "")
+                if [ -n "$task_status_json" ]; then
+                    status=$(echo "$task_status_json" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("status", "running"))' 2>/dev/null || echo "running")
+                    exitstatus=$(echo "$task_status_json" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("exitstatus", ""))' 2>/dev/null || echo "")
+                else
+                    # Fallback raw parsing
+                    status="running"
+                    exitstatus=""
+                fi
+                
+                if [ "$status" = "stopped" ]; then
+                    echo ""
+                    if [ "$exitstatus" = "OK" ]; then
+                        log_success "OCI Image pulled and cached successfully as template."
+                        PULL_SUCCESS=true
+                        break
+                    else
+                        log_warn "Proxmox API pull task exited with: $exitstatus"
+                        log_info "Task details:"
+                        pvesh get "/nodes/localhost/tasks/${UPID}/log" --output-format text 2>/dev/null | tail -n 8 || true
+                        break
+                    fi
+                fi
+                echo -n "."
+                sleep 3
+            done
+        else
+            log_warn "Could not initiate pull through Proxmox API ($PVE_OUT)"
         fi
 
-        log_info "Task started with UPID: $UPID"
-
-        # Poll PVE task for completion
-        while true; do
-            task_status_json=$(pvesh get "/nodes/localhost/tasks/${UPID}/status" --output-format json 2>/dev/null || echo "")
-            if [ -n "$task_status_json" ]; then
-                status=$(echo "$task_status_json" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("status", "running"))' 2>/dev/null || echo "running")
-                exitstatus=$(echo "$task_status_json" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("exitstatus", ""))' 2>/dev/null || echo "")
-            else
-                # Fallback raw parsing
-                status="running"
-                exitstatus=""
-            fi
-            
-            if [ "$status" = "stopped" ]; then
-                if [ "$exitstatus" = "OK" ]; then
-                    log_success "OCI Image pulled and cached successfully as template."
-                    break
+        # Fallback to direct skopeo pull with local storage TMPDIR buffering if Proxmox API pull failed
+        if [ "$PULL_SUCCESS" = false ]; then
+            if command -v skopeo &>/dev/null && [ -n "$TEMPLATE_PATH" ]; then
+                log_info "Attempting direct download with skopeo using storage temp buffering..."
+                STORAGE_TMP="$(dirname "$TEMPLATE_PATH")/tmp"
+                mkdir -p "$STORAGE_TMP"
+                rm -f "${TEMPLATE_PATH}.tmp."* 2>/dev/null || true
+                
+                if TMPDIR="$STORAGE_TMP" skopeo copy --override-os linux --override-arch amd64 "docker://${FRIGATE_IMAGE}" "oci-archive:${TEMPLATE_PATH}"; then
+                    rm -rf "$STORAGE_TMP"
+                    log_success "OCI Image pulled and cached successfully as template via direct skopeo."
+                    PULL_SUCCESS=true
                 else
-                    error_exit "Pull task failed with exit status: $exitstatus"
+                    rm -rf "$STORAGE_TMP"
+                    error_exit "Direct skopeo pull failed. Installation aborted."
                 fi
+            else
+                error_exit "OCI pull task failed. Installation aborted."
             fi
-            echo -n "."
-            sleep 3
-        done
-        echo ""
+        fi
     fi
 fi
 
