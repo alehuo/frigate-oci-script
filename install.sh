@@ -12,6 +12,7 @@ CUSTOM_MOUNT_CONTAINER=""
 CT_ID=""
 CT_HOSTNAME=""
 CLI_MEDIA_PATH=""
+CLI_NET_VLAN=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +44,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --media-path)
             CLI_MEDIA_PATH="$2"
+            shift 2
+            ;;
+        --vlan)
+            CLI_NET_VLAN="$2"
             shift 2
             ;;
         *)
@@ -214,6 +219,7 @@ if [ "$NON_INTERACTIVE" = true ]; then
     HOST_CONFIG_PATH="/opt/frigate/config"
     HOST_MEDIA_PATH="${CLI_MEDIA_PATH:-/opt/frigate/media}"
     NET_BRIDGE="vmbr0"
+    NET_VLAN="$CLI_NET_VLAN"
     NET_IP="dhcp"
     NET_GW=""
     configure_gpu="Y"
@@ -283,6 +289,9 @@ else
     read -p "Enter Network Bridge (default: vmbr0): " NET_BRIDGE
     NET_BRIDGE=${NET_BRIDGE:-vmbr0}
 
+    read -p "Enter VLAN Tag (1-4094, leave empty for none${CLI_NET_VLAN:+, default: $CLI_NET_VLAN}): " NET_VLAN
+    NET_VLAN=${NET_VLAN:-$CLI_NET_VLAN}
+
     read -p "Enter IP Address (e.g. 192.168.1.204/24 or 'dhcp', default: dhcp): " NET_IP
     NET_IP=${NET_IP:-dhcp}
 
@@ -307,6 +316,10 @@ fi
 # Validation (applicable to both interactive and silent)
 if [[ ! "$CT_ID" =~ ^[0-9]+$ ]] || [ "$CT_ID" -lt 100 ] || [ "$CT_ID" -gt 999 ]; then
     error_exit "Invalid Container ID. Must be between 100 and 999."
+fi
+
+if [ -n "$NET_VLAN" ] && { [[ ! "$NET_VLAN" =~ ^[0-9]+$ ]] || [ "$NET_VLAN" -lt 1 ] || [ "$NET_VLAN" -gt 4094 ]; }; then
+    error_exit "Invalid VLAN tag '$NET_VLAN'. Must be between 1 and 4094."
 fi
 
 if [ "$DRY_RUN" = false ] && pct status "$CT_ID" &>/dev/null; then
@@ -440,10 +453,13 @@ fi
 log_step "Creating LXC Container $CT_ID..."
 # Note that we append .tar to reference the downloaded file
 if [ "$DRY_RUN" = true ]; then
-    log_info "[DRY RUN] Would create LXC container $CT_ID using template ${TEMPLATE_STORAGE}:vztmpl/${OCI_TEMPLATE_NAME}.tar"
+    log_info "[DRY RUN] Would create LXC container $CT_ID using template ${TEMPLATE_STORAGE}:vztmpl/${OCI_TEMPLATE_NAME}.tar on bridge ${NET_BRIDGE}${NET_VLAN:+ (VLAN $NET_VLAN)}"
 else
     # Build net0 configuration
     NET0_CONF="name=eth0,bridge=$NET_BRIDGE,ip=$NET_IP"
+    if [ -n "$NET_VLAN" ]; then
+        NET0_CONF="${NET0_CONF},tag=${NET_VLAN}"
+    fi
     if [ "$NET_IP" != "dhcp" ]; then
         if [ -n "$NET_GW" ]; then
             NET0_CONF="${NET0_CONF},gw=${NET_GW}"
@@ -691,6 +707,7 @@ DESCRIPTION=$(echo -e "# Frigate OCI Script
 **Hardware Profile**
 - GPU Acceleration: ${GPU_TYPE}
 ${CORAL_LINE}- Resources: ${CT_RAM}MB RAM / ${CT_CORES} CPU Cores
+- Network: ${NET_BRIDGE}${NET_VLAN:+ (VLAN ${NET_VLAN})}
 
 **File Locations**
 - Configuration: ${HOST_CONFIG_PATH}/config.yml
@@ -737,6 +754,9 @@ echo "Hostname:       $CT_HOSTNAME"
 echo "Image Tag:      $FRIGATE_IMAGE"
 echo "Config Path:    $HOST_CONFIG_PATH/config.yml"
 echo "Media Path:     $HOST_MEDIA_PATH"
+if [ -n "$NET_VLAN" ]; then
+    echo "VLAN Tag:       $NET_VLAN"
+fi
 echo ""
 echo -e "Web UI & API (Unauthenticated): http://${IP_ADDRESS}:5000"
 echo -e "Web UI & API (Recommended):     https://${IP_ADDRESS}:8971"
